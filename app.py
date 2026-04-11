@@ -484,8 +484,9 @@ _EXPORT_JP_FONT_NAME = "NotamExportJP"
 
 
 def _register_reportlab_jp_font() -> str:
-    """reportlab 用に日本語 TrueType を登録。失敗時は Helvetica。"""
+    """reportlab 用に日本語フォントを登録。失敗時は Helvetica。"""
     from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.pdfbase.ttfonts import TTFont
 
     if _EXPORT_JP_FONT_NAME in pdfmetrics.getRegisteredFontNames():
@@ -498,6 +499,21 @@ def _register_reportlab_jp_font() -> str:
             return _EXPORT_JP_FONT_NAME
         except Exception:
             pass
+
+    for fname in (
+        "NotoSansJP-Regular.otf",
+        "NotoSansJP-Regular.ttf",
+        "NotoSansCJKjp-Regular.otf",
+    ):
+        p = os.path.join(_APP_DIR, "fonts", fname)
+        if os.path.isfile(p):
+            try:
+                pdfmetrics.registerFont(
+                    TTFont(_EXPORT_JP_FONT_NAME, p, subfontIndex=0)
+                )
+                return _EXPORT_JP_FONT_NAME
+            except Exception:
+                continue
 
     windir = os.environ.get("WINDIR", r"C:\Windows")
     candidates: list[tuple[str, int]] = [
@@ -515,6 +531,15 @@ def _register_reportlab_jp_font() -> str:
                 return _EXPORT_JP_FONT_NAME
             except Exception:
                 continue
+
+    # Windows 以外・Streamlit Cloud 等: Adobe-Japan 系 CID（追加ファイル不要）
+    for cid in ("HeiseiKakuGo-W5", "HeiseiMin-W3"):
+        try:
+            if cid not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(UnicodeCIDFont(cid))
+            return cid
+        except Exception:
+            continue
     return "Helvetica"
 
 
@@ -1115,6 +1140,7 @@ JSON スキーマ:
 
 ルール:
 - has_positions: 少なくとも1点の緯度経度を WGS84 十進度で示せる場合 true。全く無い場合 false（features は [] でよい）。
+- **lat は緯度（-90〜90）、lon は経度（-180〜180）**。日本周辺では lat が約20〜46、lon が約122〜154に収まる。値が逆になっていないか必ず確認すること。
 - PSN の DDMMSS(.ss)N DDDMMSS(.ss)E は必ず十進度に変換して points に含める。
 - 「382346N1411242E」のように **緯度・経度を連結した度分秒**（DDMMSS(.ss)N の直後に DDDMMSS(.ss)E、空白なし）で並ぶ頂点も、PSN と同様に十進度へ変換して points に含める（「BOUNDED BY …」の `-` 区切りの順で辿る）。
 - **points の並び順は重要**: 同一 feature（同一 NOTAM）の points は、その NOTAM が適用される区域の**境界の頂点を、多角形の辺に沿って周る順**に並べる（反時計回りでも時計回りでもよいが、交差しないよう原文・図・Q 行の並びに合わせる）。先頭と末尾を結ぶと閉じた多角形になること。

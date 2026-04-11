@@ -40,6 +40,31 @@ def _dms_to_decimal(deg: str, minute: str, sec: str, hemi: str) -> float:
     return v
 
 
+def _normalize_lat_lon(lat: float, lon: float) -> tuple[float, float]:
+    """
+    WGS84 の範囲外なら緯度経度の入れ替えを試す。
+    両方有効でも、日本付近で「経度が第1値に入っている」誤りを補正する。
+    """
+    if abs(lat) > 90 or abs(lon) > 180:
+        if abs(lon) <= 90 and abs(lat) <= 180:
+            return lon, lat
+        return lat, lon
+    # 例: モデルが lat=139.76, lon=35.68 と返す（本来は逆）
+    if 100 <= lat <= 160 and 20 <= lon <= 55:
+        return lon, lat
+    if 100 <= lon <= 160 and 20 <= lat <= 55:
+        return lat, lon
+    return lat, lon
+
+
+# 連結度分秒は NOTAM 座標行以外（電文番号・日付等）にもマッチしやすいので、行全体にヒントがあるときだけ拾う
+_COMPACT_DMS_LINE_HINT = re.compile(
+    r"PSN|BOUNDED\s+BY|COORDINATES?|WI\s+H|WI\s+AREA|CIRCLE\s+RADIUS|"
+    r"半径|セクター|ARC\b|DME\b|RMK\s+AREA",
+    re.IGNORECASE,
+)
+
+
 def _dms_parts_plausible(
     deg_s: str, min_s: str, sec_s: str, *, max_deg: int
 ) -> bool:
@@ -68,6 +93,9 @@ def parse_psn_points_with_optional_hgt(text: str) -> list[dict[str, Any]]:
     seen: set[tuple[float, float]] = set()
 
     def _append_point(lat: float, lon: float, tail_start: int) -> None:
+        lat, lon = _normalize_lat_lon(lat, lon)
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return
         key = (round(lat, 6), round(lon, 6))
         if key in seen:
             return
@@ -87,17 +115,18 @@ def parse_psn_points_with_optional_hgt(text: str) -> list[dict[str, Any]]:
         lon = _dms_to_decimal(m.group(5), m.group(6), m.group(7), m.group(8))
         _append_point(lat, lon, m.end())
 
-    for m in _COMPACT_DMS_NE_RE.finditer(text):
-        ld, lm, ls, lh, gd, gm, gs, gh = m.groups()
-        if not _dms_parts_plausible(ld, lm, ls, max_deg=90):
+    for line in (text or "").splitlines():
+        if not _COMPACT_DMS_LINE_HINT.search(line):
             continue
-        if not _dms_parts_plausible(gd, gm, gs, max_deg=180):
-            continue
-        lat = _dms_to_decimal(ld, lm, ls, lh)
-        lon = _dms_to_decimal(gd, gm, gs, gh)
-        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-            continue
-        _append_point(lat, lon, m.end())
+        for m in _COMPACT_DMS_NE_RE.finditer(line):
+            ld, lm, ls, lh, gd, gm, gs, gh = m.groups()
+            if not _dms_parts_plausible(ld, lm, ls, max_deg=90):
+                continue
+            if not _dms_parts_plausible(gd, gm, gs, max_deg=180):
+                continue
+            lat = _dms_to_decimal(ld, lm, ls, lh)
+            lon = _dms_to_decimal(gd, gm, gs, gh)
+            _append_point(lat, lon, m.end())
 
     return out
 
@@ -171,8 +200,12 @@ def _centroid_lon_lat(lon_lat: list[tuple[float, float]]) -> tuple[float, float]
     return lo, la
 
 
+_CTRL_OR_XML_BAD = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\uFFFE\uFFFF]")
+
+
 def _esc(s: str) -> str:
-    return html.escape(s or "", quote=True)
+    t = _CTRL_OR_XML_BAD.sub("", s or "")
+    return html.escape(t, quote=True)
 
 
 def augment_spatial_json_with_psn_regex(
@@ -184,7 +217,13 @@ def augment_spatial_json_with_psn_regex(
     原文の PSN / 連結度分秒から頂点を取り、KML 用 spatial を補完する。
     Gemini が has_positions でも誤った点列だけ返すことがあるため、
     原文から **3 点以上**取れたときはその頂点列を優先して差し替える。
+
+    国内 NOTAM が複数あるときは、全文から取った点列を 1 件にまとめると誤表示になるため
+    正規表現による全面差し替えは行わない（Gemini の feature 構成を維持する）。
     """
+    if len(domestic_list) > 1:
+        return spatial
+
     pts_rows = parse_psn_points_with_optional_hgt(raw_text)
     if not pts_rows:
         return spatial
@@ -312,6 +351,9 @@ def build_kml_bytes_from_spatial_json(
                 la = float(p["lat"])
                 lo = float(p["lon"])
             except (KeyError, TypeError, ValueError):
+                continue
+            la, lo = _normalize_lat_lon(la, lo)
+            if not (-90.0 <= la <= 90.0 and -180.0 <= lo <= 180.0):
                 continue
             low_m = low_m_base
             up_m = up_m_base
