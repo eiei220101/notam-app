@@ -445,26 +445,88 @@ def should_omit_notam_display_line(text: str) -> bool:
     return False
 
 
-def format_notam_items_for_export(notam_items: list[dict]) -> str:
-    """画面と同じルールで解析結果を1本のテキストにする（PDF用）。"""
-    blocks: list[str] = []
+_ICAO4_IN_TEXT_RE = re.compile(r"\b([A-Z]{4})\b")
+_DOMESTIC_NOTAM_AIRPORT_RE = re.compile(r"\b([A-Z]{4})\s+\d{3,5}/\d{2}\b")
+
+
+def infer_airport_label_for_notam_item(item: dict) -> str:
+    """解析項目から主たる空港の4レターを推定（PDF の枠見出し用）。取れなければ「その他」。"""
+    # 国内 RJXX 連番/年 形式は空港が明確なことが多い
+    for key in ("notam_number",):
+        val = unicodedata.normalize("NFKC", str(item.get(key) or ""))
+        m = _DOMESTIC_NOTAM_AIRPORT_RE.search(val)
+        if m:
+            return m.group(1)
+    # 適用区域・本文から 4 レター（FIR の RJJJ 単独より実空港を優先）
+    for key in ("applicable_area", "content_type", "equipment", "other_conditions", "notam_number"):
+        val = unicodedata.normalize("NFKC", str(item.get(key) or ""))
+        codes = _ICAO4_IN_TEXT_RE.findall(val)
+        if not codes:
+            continue
+        if len(codes) >= 2:
+            for c in codes:
+                if c != "RJJJ":
+                    return c
+        return codes[0]
+    return "その他"
+
+
+def group_notam_items_by_airport(notam_items: list[dict]) -> list[tuple[str, list[dict]]]:
+    """原文中の出現順を保ち、空港ラベルの初出順でまとめる。"""
+    order: list[str] = []
+    buckets: dict[str, list[dict]] = {}
     for item in notam_items:
-        lines: list[str] = []
-        for key in NOTAM_RESULT_KEYS:
-            val = item.get(key)
-            text = str(val).strip() if val is not None else ""
-            if key == "notam_number":
-                text = clean_domestic_notam_number_value(text)
-            else:
-                text = strip_international_notam_tokens(text)
-            text = strip_coordinate_like_from_text(text)
-            if should_omit_notam_display_line(text):
-                continue
-            lines.append(f"- {text}")
-        body = "\n".join(lines)
-        blocks.append(body)
-    joined = "\n\n".join(blocks).strip()
-    return joined if joined else "（解析結果の表示対象がありません）"
+        lab = infer_airport_label_for_notam_item(item)
+        if lab not in buckets:
+            order.append(lab)
+            buckets[lab] = []
+        buckets[lab].append(item)
+    return [(lb, buckets[lb]) for lb in order]
+
+
+def format_one_notam_item_export_block(item: dict) -> str:
+    """1 NOTAM の箇条書き本文（項目名なし）。表示対象行が無ければ空文字。"""
+    lines: list[str] = []
+    for key in NOTAM_RESULT_KEYS:
+        val = item.get(key)
+        text = str(val).strip() if val is not None else ""
+        if key == "notam_number":
+            text = clean_domestic_notam_number_value(text)
+        else:
+            text = strip_international_notam_tokens(text)
+        text = strip_coordinate_like_from_text(text)
+        if should_omit_notam_display_line(text):
+            continue
+        lines.append(f"- {text}")
+    return "\n".join(lines).strip()
+
+
+def build_notam_pdf_sections(notam_items: list[dict]) -> list[tuple[str, str]]:
+    """PDF 用: [(空港ラベル, その空港の本文), ...]。"""
+    sections: list[tuple[str, str]] = []
+    for label, items in group_notam_items_by_airport(notam_items):
+        blocks = [format_one_notam_item_export_block(it) for it in items]
+        blocks = [b for b in blocks if b]
+        if not blocks:
+            continue
+        sections.append((label, "\n\n".join(blocks)))
+    if not sections:
+        return [("解析結果", "（解析結果の表示対象がありません）")]
+    return sections
+
+
+def format_notam_items_for_export(notam_items: list[dict]) -> str:
+    """画面と同じルールで解析結果を1本のテキストにする（PDF・共有用）。空港ごとに見出しを付ける。"""
+    parts: list[str] = []
+    for label, items in group_notam_items_by_airport(notam_items):
+        blocks = [format_one_notam_item_export_block(it) for it in items]
+        blocks = [b for b in blocks if b]
+        if not blocks:
+            continue
+        inner = "\n\n".join(blocks)
+        parts.append(f"■ {label}\n\n{inner}")
+    out = "\n\n".join(parts).strip()
+    return out if out else "（解析結果の表示対象がありません）"
 
 
 def _split_text_chunks(text: str, chunk_size: int) -> list[str]:
@@ -556,43 +618,51 @@ def _export_pdf_chars_per_chunk(col_width_pt: float, leading: float, page_h_pt: 
     return max(280, min(n, 680))
 
 
+def _pdf_draw_page_header(
+    canvas: object,
+    header_title: str,
+    font_name: str,
+    page_w: float,
+    page_h: float,
+) -> None:
+    """各ページ上部に文書タイトルとページ番号を描画する。"""
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm as mm_unit
+
+    canvas.saveState()
+    try:
+        canvas.setFont(font_name, 11)
+    except Exception:
+        canvas.setFont("Helvetica", 11)
+    canvas.setFillColor(colors.HexColor("#263238"))
+    try:
+        pg = int(canvas.getPageNumber())
+    except Exception:
+        pg = 1
+    txt = f"{header_title}　（ページ {pg}）"
+    canvas.drawCentredString(page_w / 2.0, page_h - 9 * mm_unit, txt)
+    canvas.restoreState()
+
+
 def build_analysis_export_pdf(
-    analysis_text: str,
     *,
     header_title: str,
+    airport_sections: list[tuple[str, str]],
 ) -> bytes:
-    """解析結果のみの PDF（縦A4・1列・読みやすい体裁）。"""
+    """解析結果の PDF（縦A4・空港ごとに枠で区切る）。"""
     from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import (
-        Paragraph,
-        PageBreak,
-        SimpleDocTemplate,
-        Spacer,
-        Table,
-        TableStyle,
-    )
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     font = _register_reportlab_jp_font()
     page_size = A4
     page_w, page_h = page_size[0], page_size[1]
-    lm, rm, tm, bm = 16 * mm, 16 * mm, 12 * mm, 14 * mm
+    lm, rm, tm, bm = 16 * mm, 16 * mm, 22 * mm, 14 * mm
     usable_w = page_w - lm - rm
 
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "ExportTitle",
-        parent=styles["Title"],
-        fontName=font,
-        fontSize=12,
-        leading=15,
-        alignment=TA_CENTER,
-        spaceAfter=4,
-        textColor=colors.HexColor("#263238"),
-    )
     hdr_style = ParagraphStyle(
         "ExportHdr",
         parent=styles["Normal"],
@@ -612,15 +682,47 @@ def build_analysis_export_pdf(
         spaceAfter=0,
     )
 
-    anal = analysis_text or ""
     margin_tb_pt = float(tm + bm)
-    # 1列なので列幅は全幅。縦長なので1ページあたりの文字数はやや多めに取れる
     chunk = _export_pdf_chars_per_chunk(
         float(usable_w - 6 * mm), body_leading, float(page_h), margin_tb_pt
     )
     chunk = min(chunk + 200, 1200)
-    chunks = _split_text_chunks(anal, chunk)
-    n_pages = max(len(chunks), 1)
+
+    sections_in = airport_sections or [("解析結果", "")]
+    story: list = []
+    for label, body_raw in sections_in:
+        body = body_raw or ""
+        parts = _split_text_chunks(body, chunk) if len(body) > chunk else ([body] if body else [""])
+        for pi, part in enumerate(parts):
+            hdr_txt = f"■ {label}" + ("（続き）" if pi > 0 else "")
+            ph = Paragraph(_to_reportlab_flowable_text(hdr_txt), hdr_style)
+            pb = Paragraph(_to_reportlab_flowable_text(part) if part.strip() else " ", body_style)
+            tbl = Table(
+                [[ph], [pb]],
+                colWidths=[usable_w],
+                hAlign="LEFT",
+                repeatRows=1,
+                splitByRow=1,
+                splitInRow=1,
+            )
+            tbl.setStyle(
+                TableStyle(
+                    [
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                        ("TOPPADDING", (0, 0), (-1, 0), 8),
+                        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+                        ("TOPPADDING", (0, 1), (-1, 1), 8),
+                        ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
+                        ("BOX", (0, 0), (-1, -1), 0.85, colors.HexColor("#546e7a")),
+                        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#c8e6c9")),
+                        ("BACKGROUND", (0, 1), (0, 1), colors.HexColor("#f1f8e9")),
+                    ]
+                )
+            )
+            story.append(tbl)
+            story.append(Spacer(1, 4 * mm))
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -632,47 +734,11 @@ def build_analysis_export_pdf(
         bottomMargin=bm,
         title="NOTAM 解析結果",
     )
-    story: list = []
 
-    for i in range(n_pages):
-        if i > 0:
-            story.append(PageBreak())
+    def _on_page(canv: object, doc: object) -> None:
+        _pdf_draw_page_header(canv, header_title, font, page_w, page_h)
 
-        title_txt = f"{header_title}　（{i + 1} / {n_pages} ページ）"
-        story.append(Paragraph(_to_reportlab_flowable_text(title_txt), title_style))
-        story.append(Spacer(1, 2 * mm))
-
-        rt = chunks[i] if i < len(chunks) else ""
-        ph = Paragraph(_to_reportlab_flowable_text("■ 解析結果"), hdr_style)
-        pb = Paragraph(_to_reportlab_flowable_text(rt) if rt else " ", body_style)
-
-        tbl = Table(
-            [[ph], [pb]],
-            colWidths=[usable_w],
-            hAlign="LEFT",
-            repeatRows=1,
-            splitByRow=1,
-            splitInRow=1,
-        )
-        tbl.setStyle(
-            TableStyle(
-                [
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                    ("TOPPADDING", (0, 0), (-1, 0), 8),
-                    ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-                    ("TOPPADDING", (0, 1), (-1, 1), 8),
-                    ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
-                    ("BOX", (0, 0), (-1, -1), 0.85, colors.HexColor("#546e7a")),
-                    ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#c8e6c9")),
-                    ("BACKGROUND", (0, 1), (0, 1), colors.HexColor("#f1f8e9")),
-                ]
-            )
-        )
-        story.append(tbl)
-
-    doc.build(story)
+    doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
     buf.seek(0)
     return buf.getvalue()
 
@@ -1359,15 +1425,16 @@ def refine_domestic_notam_numbers_with_gemini(
 
 def generate_analysis_pdf_and_kml_bytes(
     *,
-    export_txt: str,
+    pdf_sections: list[tuple[str, str]],
     header_title: str,
     extracted: str,
     domestic_list: list[str],
+    notam_items_for_kml: list[dict],
     model: str,
     api_key: str,
 ) -> tuple[Optional[bytes], Optional[bytes], Optional[str]]:
     """
-    1 件の NOTAM 解析テキストから解析 PDF と KML を生成する。
+    1 件の NOTAM 解析結果から解析 PDF と KML を生成する。
     戻り値: (pdf_bytes, kml_bytes, pdf_error_message)。KML は座標が無い等で None になり得る。
     """
     pdf_bytes: Optional[bytes] = None
@@ -1375,7 +1442,7 @@ def generate_analysis_pdf_and_kml_bytes(
     pdf_err: Optional[str] = None
     try:
         pdf_bytes = build_analysis_export_pdf(
-            export_txt,
+            airport_sections=pdf_sections,
             header_title=header_title,
         )
     except Exception as ex:
@@ -1391,10 +1458,12 @@ def generate_analysis_pdf_and_kml_bytes(
         spatial = augment_spatial_json_with_psn_regex(
             spatial, extracted, domestic_list
         )
+        notam_meta_by_index = [dict(it) for it in (notam_items_for_kml or []) if isinstance(it, dict)]
         kml_bytes = build_kml_bytes_from_spatial_json(
             spatial,
             document_title=header_title,
             fallback_domestic_by_index=domestic_list,
+            notam_meta_by_index=notam_meta_by_index,
         )
     except Exception:
         kml_bytes = None
@@ -1524,6 +1593,10 @@ def main() -> None:
     col_a, col_b = st.columns([1, 4])
     with col_a:
         run = st.button("解析する", type="primary", disabled=len(notam_uploads) == 0)
+    with col_b:
+        if st.button("前回の生成物をクリア（PDF/KML）", help="ダウンロード欄に古いPDFが残るときに使います。"):
+            _clear_notam_export_session_state()
+            st.session_state.pop(MULTI_NOTAM_DOWNLOADS_KEY, None)
 
     if notam_uploads:
         f0 = notam_uploads[0]
@@ -1686,17 +1759,18 @@ def main() -> None:
                         st.caption("表示する項目がありません（空または省略対象のみ）。")
                     if len(notam_items) > 1 and idx < len(notam_items):
                         st.divider()
-                export_txt = format_notam_items_for_export(notam_items)
+                pdf_sections = build_notam_pdf_sections(notam_items)
                 domestic_list = [
                     clean_domestic_notam_number_value(str(it.get("notam_number") or ""))
                     for it in notam_items
                 ]
                 with st.spinner("解析PDF・KML を生成しています…"):
                     pdf_b, kml_b, pdf_err = generate_analysis_pdf_and_kml_bytes(
-                        export_txt=export_txt,
+                        pdf_sections=pdf_sections,
                         header_title=header_title,
                         extracted=extracted,
                         domestic_list=domestic_list,
+                        notam_items_for_kml=notam_items,
                         model=mdl,
                         api_key=api_key,
                     )

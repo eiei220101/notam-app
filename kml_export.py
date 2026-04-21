@@ -280,6 +280,7 @@ def build_kml_bytes_from_spatial_json(
     *,
     document_title: str,
     fallback_domestic_by_index: list[str],
+    notam_meta_by_index: Optional[list[dict[str, Any]]] = None,
 ) -> Optional[bytes]:
     """
     spatial JSON から KML を生成する。NOTAM（feature）ごとに points を順に結び、
@@ -290,6 +291,64 @@ def build_kml_bytes_from_spatial_json(
     features = spatial.get("features")
     if not isinstance(features, list) or not features:
         return None
+
+    _DRONE_RE = re.compile(r"(ドローン|無人航空機|UAS|UAV|RPAS|DRONE)", re.IGNORECASE)
+    _ROBL_RE = re.compile(
+        r"(ROBL|障害灯|昼間障害標識|OBST\s*LGT|OBST\s*DAY\s*MARKING)",
+        re.IGNORECASE,
+    )
+
+    def _meta_for_idx(ix: int) -> dict[str, Any]:
+        if notam_meta_by_index and 1 <= ix <= len(notam_meta_by_index):
+            v = notam_meta_by_index[ix - 1]
+            return v if isinstance(v, dict) else {}
+        return {}
+
+    def _as_text_meta(meta: dict[str, Any]) -> str:
+        # 判定は「どこかに含まれる」で十分なので、主要フィールドを連結して検索する
+        chunks = []
+        for k in ("content_type", "equipment", "other_conditions", "applicable_area", "notam_number"):
+            t = str(meta.get(k) or "").strip()
+            if t:
+                chunks.append(t)
+        return " / ".join(chunks)
+
+    def _classify(meta: dict[str, Any]) -> str:
+        t = _as_text_meta(meta)
+        if t and _DRONE_RE.search(t):
+            return "drone"
+        if t and _ROBL_RE.search(t):
+            return "robl"
+        return "default"
+
+    def _styles_for(kind: str) -> tuple[str, str]:
+        # KML color is aabbggrr
+        if kind == "drone":
+            return ("7dff0000", "http://maps.google.com/mapfiles/kml/pushpin/blue-pushpin.png")
+        if kind == "robl":
+            return ("7d0000ff", "http://maps.google.com/mapfiles/kml/pushpin/red-pushpin.png")
+        return ("7d00ff00", "http://maps.google.com/mapfiles/kml/pushpin/grn-pushpin.png")
+
+    def _should_rjdr_drone_pin_name(meta: dict[str, Any]) -> bool:
+        if _classify(meta) != "drone":
+            return False
+        area = str(meta.get("applicable_area") or "")
+        other = str(meta.get("other_conditions") or "")
+        ct = str(meta.get("content_type") or "")
+        joined = f"{area} {other} {ct}"
+        return "RJDR" in joined.upper()
+
+    def _pin_name(name_base: str, meta: dict[str, Any]) -> str:
+        if not _should_rjdr_drone_pin_name(meta):
+            return name_base
+        period = str(meta.get("jst_period") or "").strip()
+        alt = str(meta.get("altitude") or "").strip()
+        bits = [name_base]
+        if period:
+            bits.append(period)
+        if alt:
+            bits.append(alt)
+        return " / ".join(bits)
 
     def _feat_sort_key(f: object) -> tuple[int, int]:
         if not isinstance(f, dict):
@@ -323,6 +382,10 @@ def build_kml_bytes_from_spatial_json(
                 name = fb
         if not name:
             name = f"NOTAM-{idx}" if idx else "NOTAM"
+
+        meta = _meta_for_idx(idx)
+        kind = _classify(meta)
+        poly_color, pin_href = _styles_for(kind)
 
         lower_ft = feat.get("lower_ft_amsl")
         upper_ft = feat.get("upper_ft_amsl")
@@ -416,7 +479,7 @@ def build_kml_bytes_from_spatial_json(
             parts.append(f"<description>{_esc(desc)}</description>")
         parts.append("<Style>")
         parts.append(
-            "<PolyStyle><color>7d00ff00</color><outline>1</outline></PolyStyle>"
+            f"<PolyStyle><color>{poly_color}</color><outline>1</outline></PolyStyle>"
         )
         parts.append("</Style>")
         parts.append("<Polygon>")
@@ -429,12 +492,12 @@ def build_kml_bytes_from_spatial_json(
         parts.append("</Placemark>")
 
         parts.append("<Placemark>")
-        parts.append(f"<name>{_esc(name)}</name>")
+        parts.append(f"<name>{_esc(_pin_name(name, meta))}</name>")
         if desc:
             parts.append(f"<description>{_esc(desc)}</description>")
         parts.append("<Style>")
         parts.append(
-            '<IconStyle><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/pushpin/grn-pushpin.png</href></Icon></IconStyle>'
+            f'<IconStyle><scale>1.1</scale><Icon><href>{pin_href}</href></Icon></IconStyle>'
         )
         parts.append("</Style>")
         parts.append("<Point>")
