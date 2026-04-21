@@ -1730,6 +1730,9 @@ div[data-testid="stDownloadButton"] > button:hover {
     with downloads_slot.container():
         _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
 
+    # 進捗メッセージも上に固定（spinner を下に出さない）
+    progress_slot = st.empty()
+
     col_a, col_b = st.columns([1, 4])
     with col_a:
         run = st.button("解析する", type="primary", disabled=len(notam_uploads) == 0)
@@ -1906,7 +1909,8 @@ div[data-testid="stDownloadButton"] > button:hover {
                     clean_domestic_notam_number_value(str(it.get("notam_number") or ""))
                     for it in notam_items
                 ]
-                with st.spinner("解析PDF・KML を生成しています…"):
+                progress_slot.info("解析PDF・KML を生成しています…")
+                try:
                     pdf_b, kml_b, pdf_err = generate_analysis_pdf_and_kml_bytes(
                         pdf_sections=pdf_sections,
                         header_title=header_title,
@@ -1916,6 +1920,8 @@ div[data-testid="stDownloadButton"] > button:hover {
                         model=mdl,
                         api_key=api_key,
                     )
+                finally:
+                    progress_slot.empty()
                 if pdf_err:
                     st.warning(f"**{uploaded.name}** — 解析PDFの生成に失敗: {pdf_err}")
                 downloads.append(
