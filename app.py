@@ -1909,7 +1909,16 @@ div[data-testid="stDownloadButton"] > button:hover {
                     clean_domestic_notam_number_value(str(it.get("notam_number") or ""))
                     for it in notam_items
                 ]
-                progress_slot.info("解析PDF・KML を生成しています…")
+                with progress_slot.container():
+                    c_msg, c_gif = st.columns([6, 1])
+                    with c_msg:
+                        st.info("解析PDF・KML を生成しています…")
+                    with c_gif:
+                        # ロード中が視覚的に分かるよう GIF を表示
+                        st.image(
+                            "https://media.tenor.com/3Y1o7x5qvj0AAAAC/pixel-popcat-nyan-cat.gif",
+                            width=72,
+                        )
                 try:
                     pdf_b, kml_b, pdf_err = generate_analysis_pdf_and_kml_bytes(
                         pdf_sections=pdf_sections,
