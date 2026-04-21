@@ -660,7 +660,8 @@ def build_analysis_export_pdf(
     page_size = A4
     page_w, page_h = page_size[0], page_size[1]
     lm, rm, tm, bm = 16 * mm, 16 * mm, 22 * mm, 14 * mm
-    usable_w = page_w - lm - rm
+    # Table の幅がページごとに微妙にズレるのを防ぐため、明示的に float へ落として固定
+    usable_w = float(page_w - lm - rm)
 
     styles = getSampleStyleSheet()
     hdr_style = ParagraphStyle(
@@ -721,8 +722,10 @@ def build_analysis_export_pdf(
                     ]
                 )
             )
+            # 念のため left 固定（ReportLab の自動調整で中央寄せ扱いになるのを防ぐ）
+            tbl.hAlign = "LEFT"
             story.append(tbl)
-            story.append(Spacer(1, 4 * mm))
+            story.append(Spacer(0, 4 * mm))
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
