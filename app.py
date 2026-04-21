@@ -701,7 +701,7 @@ def build_analysis_export_pdf(
             tbl = Table(
                 [[ph], [pb]],
                 colWidths=[usable_w],
-                hAlign="LEFT",
+                hAlign="CENTER",
                 repeatRows=1,
                 splitByRow=1,
                 splitInRow=1,
@@ -722,8 +722,8 @@ def build_analysis_export_pdf(
                     ]
                 )
             )
-            # 念のため left 固定（ReportLab の自動調整で中央寄せ扱いになるのを防ぐ）
-            tbl.hAlign = "LEFT"
+            # 枠（Table）の左右余白を常に統一するため、配置は常に中央固定
+            tbl.hAlign = "CENTER"
             story.append(tbl)
             story.append(Spacer(0, 4 * mm))
 
