@@ -1660,6 +1660,60 @@ def main() -> None:
                 "2. 単一ファイルだけ別パスにしたい場合は、環境変数 **`NOTAM_REFERENCE_PDF`** にその PDF のフルパスを設定する（このときは knowledge 内は使いません）。"
             )
 
+    reference_upload = st.file_uploader(
+        "前提知識 PDF の上書き（任意）",
+        type=["pdf"],
+        help="アップロードした場合のみ、その内容を固定ファイルより優先して使います。空なら上の自動読込を使用。",
+    )
+
+    # 解析前でも「前提知識プレビュー」を出せるよう、ここで一度だけ抽出して使い回す
+    reference_preview_raw = ""
+    if reference_upload is not None:
+        reference_preview_raw = extract_text_from_pdf(reference_upload.getvalue())
+    elif (disk_ref_text or "").strip():
+        reference_preview_raw = disk_ref_text
+
+    if reference_upload is not None and not (reference_preview_raw or "").strip():
+        st.warning("前提知識（上書き）PDF からテキストを取得できませんでした。スキャン PDF の可能性があります。")
+    elif disk_ref_path and reference_upload is None and not (disk_ref_text or "").strip():
+        st.warning(
+            f"前提知識ファイルは見つかりましたがテキストが空です: `{disk_ref_path}`（スキャン PDFの可能性があります）"
+        )
+
+    if (reference_preview_raw or "").strip():
+        with st.expander("前提知識（抽出プレビュー）", expanded=False):
+            rprev = reference_preview_raw[:6000] + ("…" if len(reference_preview_raw) > 6000 else "")
+            st.text_area(
+                "前提知識の先頭",
+                rprev,
+                height=200,
+                disabled=True,
+                label_visibility="collapsed",
+            )
+            if len(reference_preview_raw) > MAX_REFERENCE_CHARS:
+                st.caption(
+                    f"前提知識は先頭 **{MAX_REFERENCE_CHARS:,}** 文字のみ Gemini に渡します（全 {len(reference_preview_raw):,} 文字）。"
+                )
+
+    # ダウンロードボタンを緑に（アプリ内CSSで上書き）
+    st.markdown(
+        """
+<style>
+/* download_button 全般を緑に */
+div[data-testid="stDownloadButton"] > button {
+  background-color: #43a047 !important; /* 明るめの緑 */
+  color: white !important;
+  border: 1px solid #2e7d32 !important;
+}
+div[data-testid="stDownloadButton"] > button:hover {
+  background-color: #2e7d32 !important;
+  border-color: #1b5e20 !important;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     def _render_downloads(downloads_saved: object) -> None:
         if not downloads_saved:
             return
@@ -1700,38 +1754,13 @@ def main() -> None:
                 else:
                     st.caption("KML なし（座標なし等）")
 
-    # ダウンロード欄は「前提知識」セクションの直下に固定表示
+    # ダウンロード欄は「前提知識（抽出プレビュー）」の直下に固定表示
     downloads_slot = st.empty()
     with downloads_slot.container():
         _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
 
-    # 進捗メッセージも上側（前提知識の直下）に固定
+    # 進捗メッセージも上に固定（spinner を下に出さない）
     progress_slot = st.empty()
-
-    reference_upload = st.file_uploader(
-        "前提知識 PDF の上書き（任意）",
-        type=["pdf"],
-        help="アップロードした場合のみ、その内容を固定ファイルより優先して使います。空なら上の自動読込を使用。",
-    )
-
-    # ダウンロードボタンを緑に（アプリ内CSSで上書き）
-    st.markdown(
-        """
-<style>
-/* download_button 全般を緑に */
-div[data-testid="stDownloadButton"] > button {
-  background-color: #43a047 !important; /* 明るめの緑 */
-  color: white !important;
-  border: 1px solid #2e7d32 !important;
-}
-div[data-testid="stDownloadButton"] > button:hover {
-  background-color: #2e7d32 !important;
-  border-color: #1b5e20 !important;
-}
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
 
     col_a, col_b = st.columns([1, 4])
     with col_a:
@@ -1763,33 +1792,8 @@ div[data-testid="stDownloadButton"] > button:hover {
         _clear_notam_export_session_state()
 
         disk_txt, disk_p = load_disk_reference_text()
-        reference_raw = ""
-        if reference_upload is not None:
-            reference_raw = extract_text_from_pdf(reference_upload.getvalue())
-        elif (disk_txt or "").strip():
-            reference_raw = disk_txt
-
-        if reference_upload is not None and not (reference_raw or "").strip():
-            st.warning("前提知識（上書き）PDF からテキストを取得できませんでした。スキャン PDF の可能性があります。")
-        elif disk_p and reference_upload is None and not (disk_txt or "").strip():
-            st.warning(
-                f"前提知識ファイルは見つかりましたがテキストが空です: `{disk_p}`（スキャン PDFの可能性があります）"
-            )
-
-        if reference_raw.strip():
-            with st.expander("前提知識（抽出プレビュー）", expanded=False):
-                rprev = reference_raw[:6000] + ("…" if len(reference_raw) > 6000 else "")
-                st.text_area(
-                    "前提知識の先頭",
-                    rprev,
-                    height=200,
-                    disabled=True,
-                    label_visibility="collapsed",
-                )
-                if len(reference_raw) > MAX_REFERENCE_CHARS:
-                    st.caption(
-                        f"前提知識は先頭 **{MAX_REFERENCE_CHARS:,}** 文字のみ Gemini に渡します（全 {len(reference_raw):,} 文字）。"
-                    )
+        # 解析用の前提知識は上で抽出した値をそのまま使う（配置を固定するため二重描画しない）
+        reference_raw = reference_preview_raw
 
         system_instruction = build_system_instruction(reader_label, length_label, extra_notes)
         mdl = model_name.strip() or DEFAULT_MODEL
