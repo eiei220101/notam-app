@@ -1714,7 +1714,7 @@ div[data-testid="stDownloadButton"] > button:hover {
         unsafe_allow_html=True,
     )
 
-    def _render_downloads(downloads_saved: object) -> None:
+    def _render_downloads(downloads_saved: object, *, filter_label: Optional[str] = None) -> None:
         if not downloads_saved:
             return
         if not isinstance(downloads_saved, list):
@@ -1725,6 +1725,8 @@ div[data-testid="stDownloadButton"] > button:hover {
             if not isinstance(row, dict):
                 continue
             label = str(row.get("label") or f"ファイル{i + 1}")
+            if filter_label and label != filter_label:
+                continue
             st.markdown(f"**{label}**")
             c_pdf, c_kml = st.columns(2)
             with c_pdf:
@@ -1754,14 +1756,6 @@ div[data-testid="stDownloadButton"] > button:hover {
                 else:
                     st.caption("KML なし（座標なし等）")
 
-    # ダウンロード欄は「前提知識（抽出プレビュー）」の直下に固定表示
-    downloads_slot = st.empty()
-    with downloads_slot.container():
-        _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
-
-    # 進捗メッセージも上に固定（spinner を下に出さない）
-    progress_slot = st.empty()
-
     col_a, col_b = st.columns([1, 4])
     with col_a:
         run = st.button("解析する", type="primary", disabled=len(notam_uploads) == 0)
@@ -1769,8 +1763,7 @@ div[data-testid="stDownloadButton"] > button:hover {
         if st.button("前回の生成物をクリア（PDF/KML）", help="ダウンロード欄に古いPDFが残るときに使います。"):
             _clear_notam_export_session_state()
             st.session_state.pop(MULTI_NOTAM_DOWNLOADS_KEY, None)
-            with downloads_slot.container():
-                _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
+            st.rerun()
 
     if notam_uploads:
         f0 = notam_uploads[0]
@@ -1825,6 +1818,15 @@ div[data-testid="stDownloadButton"] > button:hover {
                         st.caption(
                             f"NOTAM 本文は先頭 **{MAX_NOTAM_INPUT_CHARS:,}** 文字のみ Gemini に渡します（全 {len(extracted):,} 文字）。"
                         )
+
+            # 指定の位置（抽出プレビュー枠と解析結果の間）に固定表示する
+            downloads_slot = st.empty()
+            with downloads_slot.container():
+                _render_downloads(
+                    st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY),
+                    filter_label=uploaded.name,
+                )
+            progress_slot = st.empty()
 
             empty_row = {
                 "label": uploaded.name,
@@ -1946,6 +1948,10 @@ div[data-testid="stDownloadButton"] > button:hover {
                         "kml_filename": f"{base}.kml",
                     }
                 )
+                # 生成直後にこの位置へダウンロード欄を更新表示
+                st.session_state[MULTI_NOTAM_DOWNLOADS_KEY] = downloads
+                with downloads_slot.container():
+                    _render_downloads(downloads, filter_label=uploaded.name)
             else:
                 st.warning("JSON 形式の解析結果を自動認識できませんでした。以下はモデルの生の応答です。")
                 st.code(raw_response, language="text")
@@ -1957,8 +1963,6 @@ div[data-testid="stDownloadButton"] > button:hover {
             )
 
         st.session_state[MULTI_NOTAM_DOWNLOADS_KEY] = downloads
-        with downloads_slot.container():
-            _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
 
     # 下部への再描画は行わない（上部の downloads_slot に集約）
 
