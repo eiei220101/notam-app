@@ -655,7 +655,6 @@ def build_analysis_export_pdf(
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
     from reportlab.platypus import (
-        KeepTogether,
         PageBreak,
         Paragraph,
         SimpleDocTemplate,
@@ -703,44 +702,46 @@ def build_analysis_export_pdf(
         hdr_txt = f"■ {label}"
         ph = Paragraph(_to_reportlab_flowable_text(hdr_txt), hdr_style)
 
-        body_flow: list = []
+        # Table の「行」を NOTAM 単位にすることで、行ごとに NOSPLIT を指定できる
+        rows: list[list[object]] = [[ph]]
         blocks_in = blocks if isinstance(blocks, list) and blocks else [""]
         for bi, block in enumerate(blocks_in):
-            # 1つのNOTAMが極端に長いとKeepTogetherが成立しないため、ページ相当で分割する
+            # 1つのNOTAMが極端に長いと1ページに収まらないため、ページ相当で分割（この場合は分割は許容）
             pieces = _split_text_chunks(block, chunk) if len(block or "") > chunk else [block]
             for pi, piece in enumerate(pieces):
                 para = Paragraph(
                     _to_reportlab_flowable_text(piece) if (piece or "").strip() else " ",
                     body_style,
                 )
-                body_flow.append(KeepTogether([para]))
-                # NOTAM同士の間隔（空港枠の中での区切り）
-                body_flow.append(Spacer(0, 3 * mm))
+                rows.append([para])
 
         tbl = Table(
-            [[ph], [body_flow]],
+            rows,
             colWidths=[usable_w],
             hAlign="CENTER",
             repeatRows=1,
             splitByRow=1,
-            splitInRow=1,
+            splitInRow=0,
         )
-        tbl.setStyle(
-            TableStyle(
-                [
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                    ("TOPPADDING", (0, 0), (-1, 0), 8),
-                    ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-                    ("TOPPADDING", (0, 1), (-1, 1), 8),
-                    ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
-                    ("BOX", (0, 0), (-1, -1), 0.85, colors.HexColor("#546e7a")),
-                    ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#c8e6c9")),
-                    ("BACKGROUND", (0, 1), (0, 1), colors.HexColor("#f1f8e9")),
-                ]
-            )
-        )
+        style_cmds = [
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, 0), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+            ("BOX", (0, 0), (-1, -1), 0.85, colors.HexColor("#546e7a")),
+            ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#c8e6c9")),
+        ]
+        # 本文行の背景と余白、分割禁止（NOTAM 1 ブロック = 1 行）
+        if len(rows) >= 2:
+            style_cmds.append(("BACKGROUND", (0, 1), (0, -1), colors.HexColor("#f1f8e9")))
+            for r in range(1, len(rows)):
+                # 行単位でページ分割しない（収まらなければ次ページへ送る）
+                style_cmds.append(("NOSPLIT", (0, r), (0, r)))
+                # NOTAM 間の余白（行の上/下）
+                style_cmds.append(("TOPPADDING", (0, r), (0, r), 6))
+                style_cmds.append(("BOTTOMPADDING", (0, r), (0, r), 6))
+        tbl.setStyle(TableStyle(style_cmds))
         tbl.hAlign = "CENTER"
         return tbl
 
