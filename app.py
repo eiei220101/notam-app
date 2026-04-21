@@ -699,12 +699,26 @@ def build_analysis_export_pdf(
 
     sections_in = airport_sections or [("解析結果", [""])]
     story: list = []
-    def _notam_table(label: str, notam_text: str, *, cont: bool) -> Table:
-        hdr_txt = f"■ {label}" + ("（続き）" if cont else "")
+    def _airport_table(label: str, blocks: list[str]) -> Table:
+        hdr_txt = f"■ {label}"
         ph = Paragraph(_to_reportlab_flowable_text(hdr_txt), hdr_style)
-        pb = Paragraph(_to_reportlab_flowable_text(notam_text) if (notam_text or "").strip() else " ", body_style)
+
+        body_flow: list = []
+        blocks_in = blocks if isinstance(blocks, list) and blocks else [""]
+        for bi, block in enumerate(blocks_in):
+            # 1つのNOTAMが極端に長いとKeepTogetherが成立しないため、ページ相当で分割する
+            pieces = _split_text_chunks(block, chunk) if len(block or "") > chunk else [block]
+            for pi, piece in enumerate(pieces):
+                para = Paragraph(
+                    _to_reportlab_flowable_text(piece) if (piece or "").strip() else " ",
+                    body_style,
+                )
+                body_flow.append(KeepTogether([para]))
+                # NOTAM同士の間隔（空港枠の中での区切り）
+                body_flow.append(Spacer(0, 3 * mm))
+
         tbl = Table(
-            [[ph], [pb]],
+            [[ph], [body_flow]],
             colWidths=[usable_w],
             hAlign="CENTER",
             repeatRows=1,
@@ -734,13 +748,9 @@ def build_analysis_export_pdf(
         if sec_i > 0:
             # 空港ごとに必ず改ページ（1空港=1ページ以上）
             story.append(PageBreak())
-        blocks_in = blocks if isinstance(blocks, list) and blocks else [""]
-        for bi, block in enumerate(blocks_in):
-            # 1つのNOTAMが極端に長いと KeepTogether が成立しないため、事前にページ相当で分割する
-            pieces = _split_text_chunks(block, chunk) if len(block or "") > chunk else [block]
-            for pi, piece in enumerate(pieces):
-                tbl = _notam_table(label, piece, cont=(bi > 0 or pi > 0))
-                story.append(KeepTogether([tbl, Spacer(0, 4 * mm)]))
+        tbl = _airport_table(label, blocks if isinstance(blocks, list) else [""])
+        story.append(tbl)
+        story.append(Spacer(0, 4 * mm))
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
