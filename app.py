@@ -47,6 +47,7 @@ MODEL_FALLBACKS: list[str] = [
 MAX_REFERENCE_CHARS = 90_000
 MAX_NOTAM_INPUT_CHARS = 100_000
 MULTI_NOTAM_DOWNLOADS_KEY = "_multi_notam_downloads"
+MULTI_NOTAM_RESULTS_KEY = "_multi_notam_results"
 
 # 画面表示順（JSON の各値は「項目名なし」でこの順に箇条書きする）
 NOTAM_RESULT_KEYS: list[str] = [
@@ -1562,6 +1563,7 @@ def _clear_notam_export_session_state() -> None:
         "_heavy_header_title",
         "_heavy_model",
         MULTI_NOTAM_DOWNLOADS_KEY,
+        MULTI_NOTAM_RESULTS_KEY,
     ):
         st.session_state.pop(k, None)
 
@@ -1756,6 +1758,23 @@ div[data-testid="stDownloadButton"] > button:hover {
                 else:
                     st.caption("KML なし（座標なし等）")
 
+    def _render_cached_results(results_saved: object, *, filter_label: Optional[str] = None) -> None:
+        if not results_saved:
+            return
+        if not isinstance(results_saved, list):
+            return
+        for row in results_saved:
+            if not isinstance(row, dict):
+                continue
+            label = str(row.get("label") or "")
+            if filter_label and label != filter_label:
+                continue
+            md = str(row.get("analysis_md") or "").strip()
+            if not md:
+                continue
+            st.subheader("解析結果")
+            st.markdown(md)
+
     col_a, col_b = st.columns([1, 4])
     with col_a:
         run = st.button("解析する", type="primary", disabled=len(notam_uploads) == 0)
@@ -1763,7 +1782,16 @@ div[data-testid="stDownloadButton"] > button:hover {
         if st.button("前回の生成物をクリア（PDF/KML）", help="ダウンロード欄に古いPDFが残るときに使います。"):
             _clear_notam_export_session_state()
             st.session_state.pop(MULTI_NOTAM_DOWNLOADS_KEY, None)
+            st.session_state.pop(MULTI_NOTAM_RESULTS_KEY, None)
             st.rerun()
+
+    # ダウンロードボタン押下などの rerun 後でも消えないよう、前回結果を表示
+    cached_downloads = st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY)
+    cached_results = st.session_state.get(MULTI_NOTAM_RESULTS_KEY)
+    if cached_downloads or cached_results:
+        st.divider()
+        _render_downloads(cached_downloads)
+        _render_cached_results(cached_results)
 
     if notam_uploads:
         f0 = notam_uploads[0]
@@ -1791,6 +1819,7 @@ div[data-testid="stDownloadButton"] > button:hover {
         system_instruction = build_system_instruction(reader_label, length_label, extra_notes)
         mdl = model_name.strip() or DEFAULT_MODEL
         downloads: list[dict] = []
+        results_cache: list[dict] = []
         last_used_model: Optional[str] = None
 
         for uploaded in notam_uploads:
@@ -1891,6 +1920,7 @@ div[data-testid="stDownloadButton"] > button:hover {
                 notam_items = sanitize_domestic_notam_numbers_on_items(notam_items)
                 notam_items = augment_notam_domestic_numbers_from_raw_text(notam_items, extracted)
             if notam_items:
+                analysis_blocks: list[str] = []
                 for idx, item in enumerate(notam_items, start=1):
                     bullets: list[str] = []
                     for key in NOTAM_RESULT_KEYS:
@@ -1905,11 +1935,17 @@ div[data-testid="stDownloadButton"] > button:hover {
                             continue
                         bullets.append(f"- {text}")
                     if bullets:
-                        st.markdown("\n".join(bullets))
+                        blk = "\n".join(bullets)
+                        st.markdown(blk)
+                        analysis_blocks.append(blk)
                     else:
                         st.caption("表示する項目がありません（空または省略対象のみ）。")
                     if len(notam_items) > 1 and idx < len(notam_items):
                         st.divider()
+                        analysis_blocks.append("---")
+                # download_button 押下で rerun しても消えないように Markdown を保存
+                analysis_md = "\n\n".join(analysis_blocks).strip()
+                results_cache.append({"label": uploaded.name, "analysis_md": analysis_md})
                 pdf_sections = build_notam_pdf_sections(notam_items)
                 domestic_list = [
                     clean_domestic_notam_number_value(str(it.get("notam_number") or ""))
@@ -1950,12 +1986,14 @@ div[data-testid="stDownloadButton"] > button:hover {
                 )
                 # 生成直後にこの位置へダウンロード欄を更新表示
                 st.session_state[MULTI_NOTAM_DOWNLOADS_KEY] = downloads
+                st.session_state[MULTI_NOTAM_RESULTS_KEY] = results_cache
                 with downloads_slot.container():
                     _render_downloads(downloads, filter_label=uploaded.name)
             else:
                 st.warning("JSON 形式の解析結果を自動認識できませんでした。以下はモデルの生の応答です。")
                 st.code(raw_response, language="text")
                 downloads.append(empty_row)
+                results_cache.append({"label": uploaded.name, "analysis_md": ""})
 
         if last_used_model and normalize_model_name(model_name) != last_used_model:
             st.success(
@@ -1963,6 +2001,7 @@ div[data-testid="stDownloadButton"] > button:hover {
             )
 
         st.session_state[MULTI_NOTAM_DOWNLOADS_KEY] = downloads
+        st.session_state[MULTI_NOTAM_RESULTS_KEY] = results_cache
 
     # 下部への再描画は行わない（上部の downloads_slot に集約）
 
