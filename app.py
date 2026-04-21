@@ -1660,6 +1660,14 @@ def main() -> None:
                 "2. 単一ファイルだけ別パスにしたい場合は、環境変数 **`NOTAM_REFERENCE_PDF`** にその PDF のフルパスを設定する（このときは knowledge 内は使いません）。"
             )
 
+    # ダウンロード欄は「前提知識」セクションの直下に固定表示
+    downloads_slot = st.empty()
+    with downloads_slot.container():
+        _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
+
+    # 進捗メッセージも上側（前提知識の直下）に固定
+    progress_slot = st.empty()
+
     reference_upload = st.file_uploader(
         "前提知識 PDF の上書き（任意）",
         type=["pdf"],
@@ -1724,14 +1732,6 @@ div[data-testid="stDownloadButton"] > button:hover {
                     st.caption("Google Earth 等で開けます。ピンは NOTAM ごとに 1 本（国内番号）。")
                 else:
                     st.caption("KML なし（座標なし等）")
-
-    # ダウンロード欄は上に固定表示する（解析後に一番下までスクロールしなくて良いように）
-    downloads_slot = st.empty()
-    with downloads_slot.container():
-        _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
-
-    # 進捗メッセージも上に固定（spinner を下に出さない）
-    progress_slot = st.empty()
 
     col_a, col_b = st.columns([1, 4])
     with col_a:
