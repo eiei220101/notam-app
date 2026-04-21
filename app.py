@@ -1619,6 +1619,51 @@ def main() -> None:
         help="アップロードした場合のみ、その内容を固定ファイルより優先して使います。空なら上の自動読込を使用。",
     )
 
+    def _render_downloads(downloads_saved: object) -> None:
+        if not downloads_saved:
+            return
+        if not isinstance(downloads_saved, list):
+            return
+        st.subheader("ダウンロード")
+        st.caption("解析PDFとKMLを別ボタンで保存できます。")
+        for i, row in enumerate(downloads_saved):
+            if not isinstance(row, dict):
+                continue
+            label = str(row.get("label") or f"ファイル{i + 1}")
+            st.markdown(f"**{label}**")
+            c_pdf, c_kml = st.columns(2)
+            with c_pdf:
+                pb = row.get("pdf_bytes")
+                if isinstance(pb, (bytes, bytearray)) and len(pb) > 0:
+                    st.download_button(
+                        "解析PDFをダウンロード",
+                        data=pb,
+                        file_name=str(row.get("pdf_filename") or "notam_解析.pdf"),
+                        mime="application/pdf",
+                        key=f"multi_pdf_dl_{i}",
+                    )
+                    st.caption("縦向き A4・解析結果のみ。")
+                else:
+                    st.caption("解析PDF なし")
+            with c_kml:
+                kb = row.get("kml_bytes")
+                if isinstance(kb, (bytes, bytearray)) and len(kb) > 0:
+                    st.download_button(
+                        "KMLをダウンロード",
+                        data=kb,
+                        file_name=str(row.get("kml_filename") or "notam.kml"),
+                        mime="application/vnd.google-earth.kml+xml",
+                        key=f"multi_kml_dl_{i}",
+                    )
+                    st.caption("Google Earth 等で開けます。ピンは NOTAM ごとに 1 本（国内番号）。")
+                else:
+                    st.caption("KML なし（座標なし等）")
+
+    # ダウンロード欄は上に固定表示する（解析後に一番下までスクロールしなくて良いように）
+    downloads_slot = st.container()
+    with downloads_slot:
+        _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
+
     col_a, col_b = st.columns([1, 4])
     with col_a:
         run = st.button("解析する", type="primary", disabled=len(notam_uploads) == 0)
@@ -1826,45 +1871,7 @@ def main() -> None:
 
         st.session_state[MULTI_NOTAM_DOWNLOADS_KEY] = downloads
 
-    downloads_saved = st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY)
-    if downloads_saved:
-        st.divider()
-        st.subheader("ダウンロード")
-        st.caption("解析PDFとKMLを別ボタンで保存できます。")
-        for i, row in enumerate(downloads_saved):
-            if not isinstance(row, dict):
-                continue
-            label = str(row.get("label") or f"ファイル{i + 1}")
-            st.markdown(f"**{label}**")
-            c_pdf, c_kml = st.columns(2)
-            with c_pdf:
-                pb = row.get("pdf_bytes")
-                if isinstance(pb, (bytes, bytearray)) and len(pb) > 0:
-                    st.download_button(
-                        "解析PDFをダウンロード",
-                        data=pb,
-                        file_name=str(row.get("pdf_filename") or "notam_解析.pdf"),
-                        mime="application/pdf",
-                        key=f"multi_pdf_dl_{i}",
-                    )
-                    st.caption("縦向き A4・解析結果のみ。")
-                else:
-                    st.caption("解析PDF なし")
-            with c_kml:
-                kb = row.get("kml_bytes")
-                if isinstance(kb, (bytes, bytearray)) and len(kb) > 0:
-                    st.download_button(
-                        "KMLをダウンロード",
-                        data=kb,
-                        file_name=str(row.get("kml_filename") or "notam.kml"),
-                        mime="application/vnd.google-earth.kml+xml",
-                        key=f"multi_kml_dl_{i}",
-                    )
-                    st.caption(
-                        "Google Earth 等で開けます。ピンは NOTAM ごとに 1 本（国内番号）。"
-                    )
-                else:
-                    st.caption("KML なし（座標なし等）")
+    # 下部への再描画は行わない（上部の downloads_slot に集約）
 
 
 if __name__ == "__main__":
