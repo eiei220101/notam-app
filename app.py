@@ -1916,7 +1916,7 @@ div[data-testid="stDownloadButton"] > button:hover {
                     with c_gif:
                         # ロード中が視覚的に分かるよう GIF を表示
                         st.image(
-                            "https://media.tenor.com/3Y1o7x5qvj0AAAAC/pixel-popcat-nyan-cat.gif",
+                            "https://media1.tenor.com/m/qYpzX7uvYFcAAAAC/pixel-popcat.gif",
                             width=72,
                         )
                 try:
