@@ -1660,39 +1660,6 @@ def main() -> None:
                 "2. 単一ファイルだけ別パスにしたい場合は、環境変数 **`NOTAM_REFERENCE_PDF`** にその PDF のフルパスを設定する（このときは knowledge 内は使いません）。"
             )
 
-    # ダウンロード欄は「前提知識」セクションの直下に固定表示
-    downloads_slot = st.empty()
-    with downloads_slot.container():
-        _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
-
-    # 進捗メッセージも上側（前提知識の直下）に固定
-    progress_slot = st.empty()
-
-    reference_upload = st.file_uploader(
-        "前提知識 PDF の上書き（任意）",
-        type=["pdf"],
-        help="アップロードした場合のみ、その内容を固定ファイルより優先して使います。空なら上の自動読込を使用。",
-    )
-
-    # ダウンロードボタンを緑に（アプリ内CSSで上書き）
-    st.markdown(
-        """
-<style>
-/* download_button 全般を緑に */
-div[data-testid="stDownloadButton"] > button {
-  background-color: #43a047 !important; /* 明るめの緑 */
-  color: white !important;
-  border: 1px solid #2e7d32 !important;
-}
-div[data-testid="stDownloadButton"] > button:hover {
-  background-color: #2e7d32 !important;
-  border-color: #1b5e20 !important;
-}
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
-
     def _render_downloads(downloads_saved: object) -> None:
         if not downloads_saved:
             return
@@ -1732,6 +1699,39 @@ div[data-testid="stDownloadButton"] > button:hover {
                     st.caption("Google Earth 等で開けます。ピンは NOTAM ごとに 1 本（国内番号）。")
                 else:
                     st.caption("KML なし（座標なし等）")
+
+    # ダウンロード欄は「前提知識」セクションの直下に固定表示
+    downloads_slot = st.empty()
+    with downloads_slot.container():
+        _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
+
+    # 進捗メッセージも上側（前提知識の直下）に固定
+    progress_slot = st.empty()
+
+    reference_upload = st.file_uploader(
+        "前提知識 PDF の上書き（任意）",
+        type=["pdf"],
+        help="アップロードした場合のみ、その内容を固定ファイルより優先して使います。空なら上の自動読込を使用。",
+    )
+
+    # ダウンロードボタンを緑に（アプリ内CSSで上書き）
+    st.markdown(
+        """
+<style>
+/* download_button 全般を緑に */
+div[data-testid="stDownloadButton"] > button {
+  background-color: #43a047 !important; /* 明るめの緑 */
+  color: white !important;
+  border: 1px solid #2e7d32 !important;
+}
+div[data-testid="stDownloadButton"] > button:hover {
+  background-color: #2e7d32 !important;
+  border-color: #1b5e20 !important;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     col_a, col_b = st.columns([1, 4])
     with col_a:
