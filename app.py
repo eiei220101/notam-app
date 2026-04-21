@@ -501,17 +501,17 @@ def format_one_notam_item_export_block(item: dict) -> str:
     return "\n".join(lines).strip()
 
 
-def build_notam_pdf_sections(notam_items: list[dict]) -> list[tuple[str, str]]:
-    """PDF 用: [(空港ラベル, その空港の本文), ...]。"""
-    sections: list[tuple[str, str]] = []
+def build_notam_pdf_sections(notam_items: list[dict]) -> list[tuple[str, list[str]]]:
+    """PDF 用: [(空港ラベル, [NOTAM本文ブロック...]), ...]。NOTAM単位でページ跨ぎを防ぐため分割して持つ。"""
+    sections: list[tuple[str, list[str]]] = []
     for label, items in group_notam_items_by_airport(notam_items):
         blocks = [format_one_notam_item_export_block(it) for it in items]
         blocks = [b for b in blocks if b]
         if not blocks:
             continue
-        sections.append((label, "\n\n".join(blocks)))
+        sections.append((label, blocks))
     if not sections:
-        return [("解析結果", "（解析結果の表示対象がありません）")]
+        return [("解析結果", ["（解析結果の表示対象がありません）"])]
     return sections
 
 
@@ -647,14 +647,22 @@ def _pdf_draw_page_header(
 def build_analysis_export_pdf(
     *,
     header_title: str,
-    airport_sections: list[tuple[str, str]],
+    airport_sections: list[tuple[str, list[str]]],
 ) -> bytes:
-    """解析結果の PDF（縦A4・空港ごとに枠で区切る）。"""
+    """解析結果の PDF（縦A4・空港ごとに枠で区切る）。NOTAM本文はページを跨がない。"""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import (
+        KeepTogether,
+        PageBreak,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
 
     font = _register_reportlab_jp_font()
     page_size = A4
@@ -689,43 +697,50 @@ def build_analysis_export_pdf(
     )
     chunk = min(chunk + 200, 1200)
 
-    sections_in = airport_sections or [("解析結果", "")]
+    sections_in = airport_sections or [("解析結果", [""])]
     story: list = []
-    for label, body_raw in sections_in:
-        body = body_raw or ""
-        parts = _split_text_chunks(body, chunk) if len(body) > chunk else ([body] if body else [""])
-        for pi, part in enumerate(parts):
-            hdr_txt = f"■ {label}" + ("（続き）" if pi > 0 else "")
-            ph = Paragraph(_to_reportlab_flowable_text(hdr_txt), hdr_style)
-            pb = Paragraph(_to_reportlab_flowable_text(part) if part.strip() else " ", body_style)
-            tbl = Table(
-                [[ph], [pb]],
-                colWidths=[usable_w],
-                hAlign="CENTER",
-                repeatRows=1,
-                splitByRow=1,
-                splitInRow=1,
+    def _notam_table(label: str, notam_text: str, *, cont: bool) -> Table:
+        hdr_txt = f"■ {label}" + ("（続き）" if cont else "")
+        ph = Paragraph(_to_reportlab_flowable_text(hdr_txt), hdr_style)
+        pb = Paragraph(_to_reportlab_flowable_text(notam_text) if (notam_text or "").strip() else " ", body_style)
+        tbl = Table(
+            [[ph], [pb]],
+            colWidths=[usable_w],
+            hAlign="CENTER",
+            repeatRows=1,
+            splitByRow=1,
+            splitInRow=1,
+        )
+        tbl.setStyle(
+            TableStyle(
+                [
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                    ("TOPPADDING", (0, 0), (-1, 0), 8),
+                    ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+                    ("TOPPADDING", (0, 1), (-1, 1), 8),
+                    ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
+                    ("BOX", (0, 0), (-1, -1), 0.85, colors.HexColor("#546e7a")),
+                    ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#c8e6c9")),
+                    ("BACKGROUND", (0, 1), (0, 1), colors.HexColor("#f1f8e9")),
+                ]
             )
-            tbl.setStyle(
-                TableStyle(
-                    [
-                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                        ("TOPPADDING", (0, 0), (-1, 0), 8),
-                        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-                        ("TOPPADDING", (0, 1), (-1, 1), 8),
-                        ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
-                        ("BOX", (0, 0), (-1, -1), 0.85, colors.HexColor("#546e7a")),
-                        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#c8e6c9")),
-                        ("BACKGROUND", (0, 1), (0, 1), colors.HexColor("#f1f8e9")),
-                    ]
-                )
-            )
-            # 枠（Table）の左右余白を常に統一するため、配置は常に中央固定
-            tbl.hAlign = "CENTER"
-            story.append(tbl)
-            story.append(Spacer(0, 4 * mm))
+        )
+        tbl.hAlign = "CENTER"
+        return tbl
+
+    for sec_i, (label, blocks) in enumerate(sections_in):
+        if sec_i > 0:
+            # 空港ごとに必ず改ページ（1空港=1ページ以上）
+            story.append(PageBreak())
+        blocks_in = blocks if isinstance(blocks, list) and blocks else [""]
+        for bi, block in enumerate(blocks_in):
+            # 1つのNOTAMが極端に長いと KeepTogether が成立しないため、事前にページ相当で分割する
+            pieces = _split_text_chunks(block, chunk) if len(block or "") > chunk else [block]
+            for pi, piece in enumerate(pieces):
+                tbl = _notam_table(label, piece, cont=(bi > 0 or pi > 0))
+                story.append(KeepTogether([tbl, Spacer(0, 4 * mm)]))
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
