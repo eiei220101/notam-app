@@ -484,6 +484,53 @@ def group_notam_items_by_airport(notam_items: list[dict]) -> list[tuple[str, lis
     return [(lb, buckets[lb]) for lb in order]
 
 
+def reorder_airport_sections_for_pdf(
+    sections: list[tuple[str, list[str]]],
+) -> list[tuple[str, list[str]]]:
+    """
+    PDF 出力の空港枠の並び順を固定ルールで並べ替える。
+    優先:
+    - 1ページ目: RJSF（あれば）
+    - 2ページ目: RJSN または RJSS（あれば）。両方あれば RJSN → RJSS
+    - 最後: RJTU / RJAH（最優先で最後）。両方あれば RJTU → RJAH（RJAHが最終）
+    - それ以外: 元の出現順のまま
+    """
+    if not sections:
+        return sections
+    by_label: dict[str, list[str]] = {}
+    original_order: list[str] = []
+    for label, blocks in sections:
+        if label not in by_label:
+            original_order.append(label)
+        by_label[label] = blocks
+
+    out: list[tuple[str, list[str]]] = []
+
+    def _take(label: str) -> None:
+        if label in by_label:
+            out.append((label, by_label.pop(label)))
+
+    # 強制優先
+    _take("RJSF")
+    _take("RJSN")
+    _take("RJSS")
+
+    # 中間（元の順序を維持）
+    for lb in original_order:
+        if lb in ("RJSF", "RJSN", "RJSS", "RJTU", "RJAH"):
+            continue
+        _take(lb)
+
+    # 最後（最優先で末尾に回す）
+    _take("RJTU")
+    _take("RJAH")
+
+    # 念のため取りこぼしがあれば最後に（通常ここには来ない）
+    for lb, blocks in by_label.items():
+        out.append((lb, blocks))
+    return out
+
+
 def format_one_notam_item_export_block(item: dict) -> str:
     """1 NOTAM の箇条書き本文（項目名なし）。表示対象行が無ければ空文字。"""
     lines: list[str] = []
@@ -512,7 +559,7 @@ def build_notam_pdf_sections(notam_items: list[dict]) -> list[tuple[str, list[st
         sections.append((label, blocks))
     if not sections:
         return [("解析結果", ["（解析結果の表示対象がありません）"])]
-    return sections
+    return reorder_airport_sections_for_pdf(sections)
 
 
 def format_notam_items_for_export(notam_items: list[dict]) -> str:
@@ -1625,13 +1672,13 @@ def main() -> None:
 <style>
 /* download_button 全般を緑に */
 div[data-testid="stDownloadButton"] > button {
-  background-color: #2e7d32 !important;
+  background-color: #43a047 !important; /* 明るめの緑 */
   color: white !important;
-  border: 1px solid #1b5e20 !important;
+  border: 1px solid #2e7d32 !important;
 }
 div[data-testid="stDownloadButton"] > button:hover {
-  background-color: #1b5e20 !important;
-  border-color: #104015 !important;
+  background-color: #2e7d32 !important;
+  border-color: #1b5e20 !important;
 }
 </style>
         """,
