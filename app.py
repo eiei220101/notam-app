@@ -1619,6 +1619,25 @@ def main() -> None:
         help="アップロードした場合のみ、その内容を固定ファイルより優先して使います。空なら上の自動読込を使用。",
     )
 
+    # ダウンロードボタンを緑に（アプリ内CSSで上書き）
+    st.markdown(
+        """
+<style>
+/* download_button 全般を緑に */
+div[data-testid="stDownloadButton"] > button {
+  background-color: #2e7d32 !important;
+  color: white !important;
+  border: 1px solid #1b5e20 !important;
+}
+div[data-testid="stDownloadButton"] > button:hover {
+  background-color: #1b5e20 !important;
+  border-color: #104015 !important;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     def _render_downloads(downloads_saved: object) -> None:
         if not downloads_saved:
             return
@@ -1660,8 +1679,8 @@ def main() -> None:
                     st.caption("KML なし（座標なし等）")
 
     # ダウンロード欄は上に固定表示する（解析後に一番下までスクロールしなくて良いように）
-    downloads_slot = st.container()
-    with downloads_slot:
+    downloads_slot = st.empty()
+    with downloads_slot.container():
         _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
 
     col_a, col_b = st.columns([1, 4])
@@ -1671,6 +1690,8 @@ def main() -> None:
         if st.button("前回の生成物をクリア（PDF/KML）", help="ダウンロード欄に古いPDFが残るときに使います。"):
             _clear_notam_export_session_state()
             st.session_state.pop(MULTI_NOTAM_DOWNLOADS_KEY, None)
+            with downloads_slot.container():
+                _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
 
     if notam_uploads:
         f0 = notam_uploads[0]
@@ -1870,6 +1891,8 @@ def main() -> None:
             )
 
         st.session_state[MULTI_NOTAM_DOWNLOADS_KEY] = downloads
+        with downloads_slot.container():
+            _render_downloads(st.session_state.get(MULTI_NOTAM_DOWNLOADS_KEY))
 
     # 下部への再描画は行わない（上部の downloads_slot に集約）
 
