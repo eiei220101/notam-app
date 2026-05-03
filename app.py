@@ -13,7 +13,7 @@ import secrets
 import time
 import unicodedata
 from xml.sax.saxutils import escape
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import fitz  # PyMuPDF
 import streamlit as st
@@ -820,17 +820,98 @@ def build_analysis_export_pdf(
     return buf.getvalue()
 
 
-def parse_json_from_response(text: str) -> Optional[dict]:
-    """モデル応答から JSON オブジェクトを取り出す。"""
-    text = text.strip()
-    # ```json ... ``` 形式への対応
-    fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
-    if fence:
-        text = fence.group(1).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
+def _extract_balanced_chunk(s: str, open_ch: str, close_ch: str) -> Optional[str]:
+    """最初の open から対応する close まで（文字列内の括弧は無視）を切り出す。"""
+    i = s.find(open_ch)
+    if i < 0:
         return None
+    depth = 0
+    in_str = False
+    escape = False
+    for j in range(i, len(s)):
+        c = s[j]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+            continue
+        if c == open_ch:
+            depth += 1
+        elif c == close_ch:
+            depth -= 1
+            if depth == 0:
+                return s[i : j + 1]
+    return None
+
+
+def _try_json_loads_loose(raw: str) -> Optional[Any]:
+    """そのまま json.loads → 失敗時は先頭の {...} または [...] だけ再試行。"""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    sub = _extract_balanced_chunk(s, "{", "}")
+    if sub:
+        try:
+            return json.loads(sub)
+        except json.JSONDecodeError:
+            pass
+    sub = _extract_balanced_chunk(s, "[", "]")
+    if sub:
+        try:
+            return json.loads(sub)
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _coerce_parsed_root_to_dict(obj: Any) -> Optional[dict]:
+    """ルートが {"notams":[...]} / 単一 NOTAM オブジェクト / NOTAM の配列 のいずれかなら dict に揃える。"""
+    if isinstance(obj, dict):
+        if isinstance(obj.get("notams"), list):
+            return obj
+        if all(k in obj for k in NOTAM_RESULT_KEYS):
+            return {"notams": [obj]}
+        return obj
+    if isinstance(obj, list) and obj and all(isinstance(x, dict) for x in obj):
+        return {"notams": obj}
+    return None
+
+
+def parse_json_from_response(text: str) -> Optional[dict]:
+    """モデル応答から JSON オブジェクトを取り出す（説明文・フェンス・ルート配列にも耐性）。"""
+    blob = (text or "").strip().lstrip("\ufeff")
+    if not blob:
+        return None
+
+    candidates: list[str] = []
+    for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)\s*```", blob, re.I):
+        inner = m.group(1).strip()
+        if inner:
+            candidates.append(inner)
+    candidates.append(blob)
+
+    seen: set[str] = set()
+    for raw in candidates:
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        parsed = _try_json_loads_loose(raw)
+        if parsed is None:
+            continue
+        coerced = _coerce_parsed_root_to_dict(parsed)
+        if coerced is not None:
+            return coerced
+    return None
 
 
 def normalize_parsed_notams(parsed: Optional[dict]) -> list[dict]:
