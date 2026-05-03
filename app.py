@@ -850,39 +850,81 @@ def _extract_balanced_chunk(s: str, open_ch: str, close_ch: str) -> Optional[str
     return None
 
 
+def _repair_json_text_for_decode(s: str) -> str:
+    """モデルがよく返す非標準 JSON を軽く直してから json.loads する。"""
+    t = unicodedata.normalize("NFKC", s)
+    # スマートクォート・全角引用符（JSON はダブルクォート必須）
+    trans = str.maketrans(
+        "\u201c\u201d\u201e\u201f\u2033\u2036\u00ab\u00bb\uff02\u300c\u300d",
+        '"' * 11,
+    )
+    t = t.translate(trans)
+    t = t.replace("\u2018", "'").replace("\u2019", "'").replace("\uff07", "'")
+    # オブジェクト・配列末尾の余計なカンマ（JSON では禁止だがモデルが付ける）
+    prev = None
+    while prev != t:
+        prev = t
+        t = re.sub(r",(\s*})", r"\1", t)
+        t = re.sub(r",(\s*])", r"\1", t)
+    return t
+
+
 def _try_json_loads_loose(raw: str) -> Optional[Any]:
-    """そのまま json.loads → 失敗時は先頭の {...} または [...] だけ再試行。"""
+    """そのまま json.loads → 軽い修復 → 先頭の {...} / [...] で再試行。"""
     s = (raw or "").strip()
     if not s:
         return None
-    try:
-        return json.loads(s)
-    except json.JSONDecodeError:
-        pass
+
+    def _loads_many(fragment: str) -> Optional[Any]:
+        for variant in (fragment, _repair_json_text_for_decode(fragment)):
+            if not variant.strip():
+                continue
+            try:
+                return json.loads(variant)
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    got = _loads_many(s)
+    if got is not None:
+        return got
     sub = _extract_balanced_chunk(s, "{", "}")
     if sub:
-        try:
-            return json.loads(sub)
-        except json.JSONDecodeError:
-            pass
+        got = _loads_many(sub)
+        if got is not None:
+            return got
     sub = _extract_balanced_chunk(s, "[", "]")
     if sub:
-        try:
-            return json.loads(sub)
-        except json.JSONDecodeError:
-            pass
+        got = _loads_many(sub)
+        if got is not None:
+            return got
+    return None
+
+
+def _notams_list_from_dict(obj: dict) -> Optional[list]:
+    """notams / Notams など大小無視で配列を取り出す。"""
+    if not isinstance(obj, dict):
+        return None
+    if isinstance(obj.get("notams"), list):
+        return obj["notams"]
+    for k, v in obj.items():
+        if isinstance(k, str) and k.lower() == "notams" and isinstance(v, list):
+            return v
     return None
 
 
 def _coerce_parsed_root_to_dict(obj: Any) -> Optional[dict]:
-    """ルートが {"notams":[...]} / 単一 NOTAM オブジェクト / NOTAM の配列 のいずれかなら dict に揃える。"""
+    """ルートが {"notams":[...]} / 単一 NOTAM オブジェクト / NOTAM の配列 のいずれかなら dict に揃える。形が合わなければ None。"""
     if isinstance(obj, dict):
-        if isinstance(obj.get("notams"), list):
-            return obj
+        nl = _notams_list_from_dict(obj)
+        if nl is not None:
+            out = {k: v for k, v in obj.items() if not (isinstance(k, str) and k.lower() == "notams")}
+            out["notams"] = nl
+            return out
         if all(k in obj for k in NOTAM_RESULT_KEYS):
             return {"notams": [obj]}
-        return obj
-    if isinstance(obj, list) and obj and all(isinstance(x, dict) for x in obj):
+        return None
+    if isinstance(obj, list) and all(isinstance(x, dict) for x in obj):
         return {"notams": obj}
     return None
 
@@ -918,8 +960,8 @@ def normalize_parsed_notams(parsed: Optional[dict]) -> list[dict]:
     """Gemini の JSON を、画面表示用の NOTAM オブジェクト配列に正規化する。"""
     if not parsed or not isinstance(parsed, dict):
         return []
-    items = parsed.get("notams")
-    if isinstance(items, list) and items:
+    items = _notams_list_from_dict(parsed)
+    if isinstance(items, list):
         return [x for x in items if isinstance(x, dict)]
     if all(k in parsed for k in NOTAM_RESULT_KEYS):
         return [parsed]
@@ -2100,8 +2142,18 @@ div[data-testid="stDownloadButton"] > button:hover {
                 with downloads_slot.container():
                     _render_downloads(downloads, filter_label=uploaded.name)
             else:
-                st.warning("JSON 形式の解析結果を自動認識できませんでした。以下はモデルの生の応答です。")
-                st.code(raw_response, language="text")
+                if parsed is None:
+                    st.warning(
+                        "JSON 形式の解析結果を自動認識できませんでした。以下はモデルの生の応答です。"
+                    )
+                else:
+                    st.warning(
+                        "JSON は構造として読み取れましたが、**表示できる NOTAM が 0 件**です。"
+                        "（`notams` が空、要素がオブジェクトでない、または必須キーが揃ったブロックがありません。）"
+                        "必要ならモデルの応答を確認してください。"
+                    )
+                if (raw_response or "").strip():
+                    st.code(raw_response, language="text")
                 downloads.append(empty_row)
                 results_cache.append({"label": uploaded.name, "analysis_md": ""})
 
