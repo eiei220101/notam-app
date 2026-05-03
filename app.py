@@ -44,9 +44,27 @@ MODEL_FALLBACKS: list[str] = [
     "gemini-2.0-flash-lite",
 ]
 
+def _int_env(name: str, default: int, *, lo: int, hi: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        return default
+    return max(lo, min(hi, v))
+
+
 # 前提知識 PDF / NOTAM PDF から Gemini に渡す最大文字数（モデル上限・速度のバランス）
-MAX_REFERENCE_CHARS = 90_000
-MAX_NOTAM_INPUT_CHARS = 100_000
+# 長い PDF（数十ページ）で 400 や JSON 切れが出る場合は NOTAM_MAX_COMBINED_CHARS / NOTAM_MAX_INPUT_CHARS を下げる。
+MAX_REFERENCE_CHARS = _int_env("NOTAM_MAX_REFERENCE_CHARS", 90_000, lo=2_000, hi=300_000)
+MAX_NOTAM_INPUT_CHARS = _int_env("NOTAM_MAX_INPUT_CHARS", 100_000, lo=8_000, hi=300_000)
+MAX_COMBINED_PROMPT_CHARS = _int_env(
+    "NOTAM_MAX_COMBINED_CHARS",
+    190_000,
+    lo=35_000,
+    hi=500_000,
+)
 MULTI_NOTAM_DOWNLOADS_KEY = "_multi_notam_downloads"
 MULTI_NOTAM_RESULTS_KEY = "_multi_notam_results"
 
@@ -1294,6 +1312,31 @@ def _is_gemini_429_error(exc: BaseException) -> bool:
     return "quota" in msg.lower() and "exceed" in msg.lower()
 
 
+def _is_gemini_payload_or_context_limit_error(exc: BaseException) -> bool:
+    """413 または、入力が長すぎる等の 400（トークン・コンテキスト・ペイロード）。"""
+    code = getattr(exc, "code", None)
+    if code == 413:
+        return True
+    if code != 400:
+        return False
+    blob = (str(exc) + repr(exc)).lower()
+    keys = (
+        "token",
+        "tokens",
+        "context length",
+        "context window",
+        "too long",
+        "too many",
+        "maximum",
+        "exceed",
+        "payload",
+        "request size",
+        "content length",
+        "input length",
+    )
+    return any(k in blob for k in keys)
+
+
 def _is_gemini_403_permission_denied_error(exc: BaseException) -> bool:
     """google.genai.errors.ClientError は .code / .status を持つ。str() に依存しない。"""
     if getattr(exc, "code", None) == 403:
@@ -1341,6 +1384,16 @@ GEMINI_403_USER_HINT = """
 """.strip()
 
 
+GEMINI_PAYLOAD_LIMIT_HINT = f"""
+**入力が長すぎる／API が拒否した可能性（多ページ PDF で起きやすい）**
+
+- **前提知識＋NOTAM 本文**の合計が長いと、Gemini が **400** や **413**、あるいは **応答 JSON の途中切れ**を返すことがあります。
+- **このアプリ側の対策**: 既定では **送信文字の合計上限**（`NOTAM_MAX_COMBINED_CHARS`＝**{MAX_COMBINED_PROMPT_CHARS:,}** 文字）に合わせて **NOTAM 本文の末尾を自動で短く**します。前提知識を優先し、本文が削られます（本文単体の上限は `NOTAM_MAX_INPUT_CHARS`＝**{MAX_NOTAM_INPUT_CHARS:,}**）。
+- **手動の調整**: 環境変数 **`NOTAM_MAX_INPUT_CHARS`**、**`NOTAM_MAX_REFERENCE_CHARS`**、**`NOTAM_MAX_COMBINED_CHARS`** を小さくすると安定しやすいです。
+- **運用**: **PDF を空港・日付などで分割**して複数回解析するのが確実です。
+""".strip()
+
+
 _NOTAM_NUMBER_USER_REMINDER = (
     "\n\n【notam_number の再確認（最重要）】"
     "JSON の notam_number には、原文に**国内NOTAM番号として印字されている文字列だけ**を写経すること（改変・推測禁止）。"
@@ -1352,10 +1405,31 @@ _NOTAM_NUMBER_USER_REMINDER = (
 
 def build_user_prompt_for_analysis(notam_text: str, reference_text: str) -> str:
     """NOTAM 本文と、任意の前提知識テキストからユーザープロンプトを組み立てる。"""
-    notam_trim = (notam_text or "").strip()[:MAX_NOTAM_INPUT_CHARS]
+    raw_notam = (notam_text or "").strip()
     ref = (reference_text or "").strip()
-    if ref:
-        ref_trim = ref[:MAX_REFERENCE_CHARS]
+    ref_trim = ref[:MAX_REFERENCE_CHARS]
+    notam_trim = raw_notam[:MAX_NOTAM_INPUT_CHARS]
+
+    overhead = len(_NOTAM_NUMBER_USER_REMINDER) + (5200 if ref_trim else 4200)
+    combined = len(ref_trim) + len(notam_trim) + overhead
+    trim_note = ""
+    if combined > MAX_COMBINED_PROMPT_CHARS:
+        room = MAX_COMBINED_PROMPT_CHARS - overhead - len(ref_trim)
+        if room < 12_000:
+            ref_trim = ref_trim[: max(3_000, MAX_COMBINED_PROMPT_CHARS - overhead - 12_000)]
+            room = MAX_COMBINED_PROMPT_CHARS - overhead - len(ref_trim)
+        notam_trim = notam_trim[: max(12_000, room)]
+        trim_note = (
+            "\n\n【システム注】前提知識＋本文が長いため、上記 NOTAM 本文は送信上限に合わせて**途中まで**にしています。"
+            "末尾ページの NOTAM は欠ける可能性があります。全文が必要なら PDF を分割するか、"
+            "環境変数 NOTAM_MAX_COMBINED_CHARS / NOTAM_MAX_INPUT_CHARS を調整してください。"
+        )
+    elif len(raw_notam) > len(notam_trim):
+        trim_note = (
+            "\n\n【システム注】NOTAM_MAX_INPUT_CHARS に達し、原文の末尾を省略しています。"
+        )
+
+    if ref_trim:
         return (
             "【前提知識（ユーザーが指定した PDF から抽出したテキスト）】\n"
             "以下を用語・手順・番号体系などの根拠として参照すること。\n"
@@ -1368,6 +1442,7 @@ def build_user_prompt_for_analysis(notam_text: str, reference_text: str) -> str:
             f"{notam_trim}\n"
             "---"
             f"{_NOTAM_NUMBER_USER_REMINDER}"
+            f"{trim_note}"
         )
     return (
         "以下は PDF から抽出したテキストです。指定の JSON 形式のみで回答してください。\n\n"
@@ -1375,6 +1450,7 @@ def build_user_prompt_for_analysis(notam_text: str, reference_text: str) -> str:
         f"{notam_trim}\n"
         "---"
         f"{_NOTAM_NUMBER_USER_REMINDER}"
+        f"{trim_note}"
     )
 
 
@@ -1481,7 +1557,7 @@ def extract_spatial_features_gemini(
         "**重要**: 各 feature の notam_index・domestic_notam_number は上表と厳密に一致させること。"
         "特に **notam_index=1** は原文先頭の最初の NOTAM ブロックの座標のみに対応させ、国内番号は表の 1 行目と同一文字列にする（取り違え禁止）。\n"
         "---\n"
-        f"{(raw_text or '').strip()[:85000]}\n"
+        f"{(raw_text or '').strip()[:MAX_NOTAM_INPUT_CHARS]}\n"
         "---"
     )
     last_error: Optional[BaseException] = None
@@ -1609,7 +1685,7 @@ def refine_domestic_notam_numbers_with_gemini(
         "【現在の値】\n"
         f"{json.dumps(table, ensure_ascii=False, indent=2)}\n\n"
         "【NOTAM 原文（PDF 抽出テキスト）】\n---\n"
-        f"{(raw_text or '').strip()[:92000]}\n---"
+        f"{(raw_text or '').strip()[:MAX_NOTAM_INPUT_CHARS]}\n---"
     )
 
     last_error: Optional[BaseException] = None
@@ -1994,7 +2070,19 @@ div[data-testid="stDownloadButton"] > button:hover {
             st.subheader(uploaded.name)
 
             with st.spinner("PDF からテキストを抽出しています…"):
-                extracted = extract_text_from_pdf(uploaded.getvalue())
+                try:
+                    extracted = extract_text_from_pdf(uploaded.getvalue())
+                except Exception as ex:
+                    logging.getLogger(__name__).warning("PDF テキスト抽出失敗", exc_info=True)
+                    st.error(f"**{uploaded.name}** — PDF の読み込みまたはテキスト抽出に失敗しました: {ex}")
+                    downloads.append(empty_row)
+                    continue
+
+            if len(extracted) > 45_000:
+                st.info(
+                    "抽出テキストが長いです。**前提知識＋本文の合計**が API 上限に近いとエラーや JSON 切れが出やすいため、"
+                    "必要に応じて PDF を分割するか、環境変数 `NOTAM_MAX_COMBINED_CHARS` を調整してください。"
+                )
 
             with st.expander(f"抽出テキスト（プレビュー）: {uploaded.name}", expanded=False):
                 if not extracted:
@@ -2054,6 +2142,8 @@ div[data-testid="stDownloadButton"] > button:hover {
                         st.markdown(GEMINI_429_USER_HINT)
                     elif _is_gemini_403_permission_denied_error(e):
                         st.markdown(GEMINI_403_USER_HINT)
+                    elif _is_gemini_payload_or_context_limit_error(e):
+                        st.markdown(GEMINI_PAYLOAD_LIMIT_HINT)
                     else:
                         st.info(
                             "主に **404（モデル未提供）** 向け: モデル名を **gemini-2.5-flash** または **gemini-2.0-flash** にし、"
