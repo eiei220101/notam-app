@@ -218,15 +218,11 @@ def augment_spatial_json_with_psn_regex(
     Gemini が has_positions でも誤った点列だけ返すことがあるため、
     原文から **3 点以上**取れたときはその頂点列を優先して差し替える。
 
-    国内 NOTAM が複数あるときは、全文から取った点列を 1 件にまとめると誤表示になるため
-    正規表現による全面差し替えは行わない（Gemini の feature 構成を維持する）。
+    国内 NOTAM が複数かつ **Gemini が既に点列を返している** ときは、原文 PSN による
+    全面差し替えを行わない（誤表示防止）。**Gemini が点なし**のときは、先頭 NOTAM へ
+    原文の PSN のみ紐づけて KML 可能にする（他 NOTAM 区域との混同に注意）。
     """
-    if len(domestic_list) > 1:
-        return spatial
-
     pts_rows = parse_psn_points_with_optional_hgt(raw_text)
-    if not pts_rows:
-        return spatial
 
     def _features_empty_or_no_points() -> bool:
         feats = spatial.get("features")
@@ -239,6 +235,42 @@ def augment_spatial_json_with_psn_regex(
             if isinstance(p, list) and p:
                 return False
         return True
+
+    # 複数 NOTAM: これまで原文 PSN を一切見なかった。Gemini が座標なしのときだけ、先頭 NOTAM に PSN を紐づけて KML を可能にする。
+    if len(domestic_list) > 1:
+        if not pts_rows:
+            return spatial
+        if not _features_empty_or_no_points():
+            return spatial
+        dom = (domestic_list[0] if domestic_list else "").strip()
+        points: list[dict[str, Any]] = []
+        for pr in pts_rows:
+            la = float(pr["lat"])
+            lo = float(pr["lon"])
+            cell: dict[str, Any] = {
+                "lat": la,
+                "lon": lo,
+                "comment": "原文（PSN/連結度分秒）より抽出（複数NOTAM時は先頭件のみ）",
+            }
+            if "upper_ft_amsl" in pr:
+                cell["upper_ft_amsl"] = pr["upper_ft_amsl"]
+            points.append(cell)
+        return {
+            "has_positions": True,
+            "features": [
+                {
+                    "notam_index": 1,
+                    "domestic_notam_number": dom,
+                    "points": points,
+                    "lower_ft_amsl": 0.0,
+                    "upper_ft_amsl": None,
+                    "notes": "自動補完（複数NOTAM・先頭のみ）",
+                }
+            ],
+        }
+
+    if not pts_rows:
+        return spatial
 
     gemini_nonempty = spatial.get("has_positions") and not _features_empty_or_no_points()
     # 多角形級の座標が原文にあるのに、Gemini だけ信じるとズレるため上書きする

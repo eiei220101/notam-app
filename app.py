@@ -7,6 +7,7 @@ from __future__ import annotations
 import glob
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -914,7 +915,7 @@ def _notams_list_from_dict(obj: dict) -> Optional[list]:
 
 
 def _coerce_parsed_root_to_dict(obj: Any) -> Optional[dict]:
-    """ルートが {"notams":[...]} / 単一 NOTAM オブジェクト / NOTAM の配列 のいずれかなら dict に揃える。形が合わなければ None。"""
+    """ルートが {"notams":[...]} / 単一 NOTAM / NOTAM の配列 / KML 用 spatial のいずれかなら dict に揃える。形が合わなければ None。"""
     if isinstance(obj, dict):
         nl = _notams_list_from_dict(obj)
         if nl is not None:
@@ -923,6 +924,20 @@ def _coerce_parsed_root_to_dict(obj: Any) -> Optional[dict]:
             return out
         if all(k in obj for k in NOTAM_RESULT_KEYS):
             return {"notams": [obj]}
+        # Gemini 座標抽出（KML 用）。notams より後に判定し、本文 JSON と衝突させない。
+        feats = obj.get("features")
+        if isinstance(feats, list):
+            out = dict(obj)
+            if "has_positions" not in out:
+                hp = False
+                for f in feats:
+                    if isinstance(f, dict):
+                        pts = f.get("points")
+                        if isinstance(pts, list) and pts:
+                            hp = True
+                            break
+                out["has_positions"] = hp
+            return out
         return None
     if isinstance(obj, list) and all(isinstance(x, dict) for x in obj):
         return {"notams": obj}
@@ -1691,7 +1706,8 @@ def generate_analysis_pdf_and_kml_bytes(
             fallback_domestic_by_index=domestic_list,
             notam_meta_by_index=notam_meta_by_index,
         )
-    except Exception:
+    except Exception as ex:
+        logging.getLogger(__name__).warning("KML 生成で例外: %s", ex, exc_info=True)
         kml_bytes = None
     return pdf_bytes, kml_bytes, pdf_err
 
