@@ -1156,6 +1156,22 @@ def _is_gemini_429_error(exc: BaseException) -> bool:
     return "quota" in msg.lower() and "exceed" in msg.lower()
 
 
+def _is_gemini_403_permission_denied_error(exc: BaseException) -> bool:
+    """google.genai.errors.ClientError は .code / .status を持つ。str() に依存しない。"""
+    if getattr(exc, "code", None) == 403:
+        return True
+    status = getattr(exc, "status", None)
+    if isinstance(status, str) and status.upper() == "PERMISSION_DENIED":
+        return True
+    blob = str(exc) + repr(exc)
+    blob_l = blob.lower()
+    if "403" in blob and "permission_denied" in blob_l:
+        return True
+    if "your project has been denied access" in blob_l:
+        return True
+    return "denied access" in blob_l and "contact support" in blob_l
+
+
 def _retry_delay_seconds_from_gemini_error(exc: BaseException) -> float:
     """API メッセージの retry in Xs から待機秒。無ければ既定。"""
     m = re.search(r"retry in ([\d.]+)\s*s", str(exc), re.I)
@@ -1174,6 +1190,16 @@ GEMINI_429_USER_HINT = """
   このアプリは **PDF 1 件あたり メイン解析 ＋ KML 用解析 の最低 2 回** API を呼ぶため、**短時間で複数 PDF を解析するとすぐ上限に達しやすい**です。
 - **対処**: [Google AI Studio の料金・プラン](https://ai.google.dev/pricing) で課金・有効化する、[利用状況](https://ai.dev/rate-limit) を確認する、**しばらく時間を空ける（翌日まで待つ）**、**一度に扱う PDF を減らす**、サイドバーの **モデル名を変える**（例: `gemini-2.0-flash` は別枠のことがある）など。
 - 短時間の連続制限の場合は、**数十秒待って再試行**すると通ることがあります（アプリ側でも自動で数回待機します）。
+""".strip()
+
+
+GEMINI_403_USER_HINT = """
+**403（PERMISSION_DENIED）について**
+
+- このメッセージは **PDF の中身ではなく、お使いの API キーに紐づく Google 側プロジェクトへのアクセスが拒否されている**ときに返ります（「Your project has been denied access」）。
+- **試すこと**: [Google AI Studio で API キーを新規作成](https://aistudio.google.com/apikey)し、サイドバーにそのキーを貼り直す。別の Google アカウントで新規キーを発行して試す。
+- **確認**: [Google Cloud Console](https://console.cloud.google.com/) で該当プロジェクトの請求・利用制限・ポリシー通知がないか見る。組織ポリシーや地域による制限の記載がある場合があります。
+- **それでも直らない場合**: Google の案内どおり **サポートへの問い合わせ**が必要な状態です（アプリ側の設定やコードでは解消できません）。
 """.strip()
 
 
@@ -1887,10 +1913,13 @@ div[data-testid="stDownloadButton"] > button:hover {
                     st.error(f"**{uploaded.name}** — Gemini API でエラー: {e}")
                     if _is_gemini_429_error(e):
                         st.markdown(GEMINI_429_USER_HINT)
+                    elif _is_gemini_403_permission_denied_error(e):
+                        st.markdown(GEMINI_403_USER_HINT)
                     else:
                         st.info(
-                            "モデル名を **gemini-2.5-flash** または **gemini-2.0-flash** にし、"
+                            "主に **404（モデル未提供）** 向け: モデル名を **gemini-2.5-flash** または **gemini-2.0-flash** にし、"
                             "`python -m pip install -U google-genai` で SDK を更新してから再試行してください。"
+                            " **403 のときはモデル名では解決しません**（API キー／Google プロジェクト側の利用拒否です）。"
                         )
                     downloads.append(empty_row)
                     continue
